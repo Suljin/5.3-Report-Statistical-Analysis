@@ -1,0 +1,292 @@
+---
+title: "Statistical Analysis 5.3 Report"
+author: "Jason Wilcox"
+date: "July 1, 2018"
+output: rmarkdown::github_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r message=FALSE, warning=FALSE, comment=NA, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(scales)
+library(ggrepel)
+library(tidyr)
+library(gridExtra)
+library(RColorBrewer)
+library(forcats) #used for categorical values
+library(VIM) #kNN impute
+
+
+train <- read.csv("C:/Users/jason/Desktop/Capstone/Final Project Housing Prices/traindata.csv")
+test <- read.csv("C:/Users/jason/Desktop/Capstone/Final Project Housing Prices/testdata.csv")
+
+test$SalePrice <- NA
+combined <- rbind(train, test)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#                                     Data Exploration
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# _______Sale Price__________
+ggplot(combined, aes(x = SalePrice)) +
+  geom_histogram(fill = "red", binwidth = 10000) + 
+  stat_bin(binwidth = 10000, geom = "text", aes(label = ..count..), vjust = -1.5) +
+  scale_x_continuous(limits = c(1, 400000), labels = scales::comma)
+
+summary(combined$SalePrice)
+#   Min. 1st Qu.  Median   Mean    3rd Qu.    Max. 
+# 34900  129975   163000   180921  214000     755000
+
+# _______SalePrice vs Square Foot______
+# Is there a relation to size of house and price?    
+ggplot(combined, aes(x = X1stFlrSF + X2ndFlrSF, y = SalePrice)) +
+  geom_point() +
+  scale_y_continuous(labels = scales::comma) +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(name = "1st + 2nd Floor (sqft)")
+# Yes positive correlation between house size and price
+
+
+# ______Correlation_______
+# Important Variables, using correlation can determine which have big impact
+numbers <- which(sapply(combined, is.numeric))
+numNames <- names(numbers)
+
+combined_numVar <- combined[, numbers]
+cor_numVar <- cor(combined_numVar, use = "pairwise.complete.obs") #find correlation values between all numbered variables
+cor_sorted <- as.matrix(sort(cor_numVar[, "SalePrice"], decreasing = TRUE))
+#SalePrice      1.00000000
+#OverallQual    0.79098160
+#GrLivArea      0.70862448
+#GarageCars     0.64040920
+#GarageArea     0.62343144
+#TotalBsmtSF    0.61358055
+#X1stFlrSF      0.60585218
+#FullBath       0.56066376
+#TotRmsAbvGrd   0.53372316
+#YearBuilt      0.52289733
+#YearRemodAdd   0.50710097
+
+# Top 10, all above 0.5 corr
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x) > 0.5)))
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+corrplot.mixed(cor_numVar, tl.col = "black", tl.pos = "lt") #Why is this so small?
+# Shows that there could be issues with colinearity (such as with garagecars and garage area
+# both of which have a strong correlation with SalePrice). 
+
+# OverallQual has the highest correlation with SalePrice (0.79). It is a value 1-10 showing the quality of a home
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 1.000   5.000   6.000   6.089   7.000  10.000
+
+
+# _________Overall Quality vs SalePrice _____________
+Quality_Box <- ggplot(combined, aes(x = factor(OverallQual), y = SalePrice)) + # factor() splits graph by numbered value
+  geom_boxplot(col = "blue") +
+  labs(x = "Overall Quality") +
+  scale_y_continuous(labels = comma)
+  
+Quality_Box + geom_smooth(methond = "lm", se = FALSE, aes(group = 1), color = "red")
+
+# Clearly shows that as Overal Quality goes up, so does Sale Price (not surprising)
+# Seems to be a change in rate between 6 and 7. The price/quality point seems to increase there 
+# As quality goes up, so does the variance in prices (expected), as features vary and so does associated costs
+# No major outliers other than a high cost house with quality 4(mistake?), and possibly a low cost home at quality 10.
+
+
+#_________Above Ground Living Area vs SalePrice____________
+ggplot(combined, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point() +
+  geom_smooth(method = "lm") + #linear model
+  scale_y_continuous(labels = comma)
+
+# Some outliers at 4700 sqft and 5600 sqft to be considered later
+
+
+#__________Garage Cars vs SalePrice_________
+# Size of garage in car capacity
+
+Garage_Box <- ggplot(combined, aes(x = factor(GarageCars), y = SalePrice)) +
+  geom_boxplot()
+Garage_Box + geom_smooth(method = "lm", se = FALSE, aes(group = 1))
+# As garage capacity (in terms of cars) goes up, so would the value of the house with it. 
+cat("There are", length(which(combined$GarageCars == 3)), "homes with a 3 car garage")
+cat("There are", length(which(combined$GarageCars == 4)), "homes with a 4 car garage")
+# Huge difference in the number of homes with a 3 car vs 4 car garage.
+
+#_____________GarageArea vs SalePrice________________
+# Size of garage in sqft
+ggplot(combined, aes(x = GarageArea, y = SalePrice)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+
+
+
+#---------------------------------------------------
+#_____________Factored Categories___________________
+factors <- which(sapply(combined, is.factor))
+
+
+#_____________Price and Others grouped by Neighborhood_________________
+# Are some houses more costly based on certain neighborhoods?
+citygroup <- combined %>%
+  select(Neighborhood, SalePrice, LotArea, LotFrontage, X1stFlrSF, X2ndFlrSF, OverallQual, YearBuilt) %>%
+  dplyr::group_by(Neighborhood) %>%
+  dplyr::summarize(SalePrice = mean(SalePrice, na.rm = TRUE), LotArea = mean(LotArea, na.rm = TRUE), LotFrontage = mean(LotFrontage, na.rm = TRUE), SF = mean(X1stFlrSF + X2ndFlrSF), OverallQual = mean(OverallQual), YearBuilt = mean(YearBuilt))
+
+
+# Reorder factor levels of Neighborhood by Saleprice
+citygroup$Neighborhood <- factor(citygroup$Neighborhood, levels = citygroup$Neighborhood[order(citygroup$SalePrice)]) 
+
+colorcount <- length(citygroup$Neighborhood) # n count for color pallete
+getPalette <- colorRampPalette(brewer.pal(9, "Set1")) # interpolating colors
+
+# Neighborhood by Sale Price
+neighborhood1 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), SalePrice)) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  geom_hline(yintercept = mean(citygroup$SalePrice), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+neighborhood1 # Clearly some of the neighborhoods have much more valuable houses than others
+# NoRidge, NridgHt, stoneBr
+
+# Neighborhood by OverallQual
+neighborhood2 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), OverallQual)) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(limits = c(0, 10)) +
+  geom_hline(yintercept = mean(citygroup$OverallQual), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+neighborhood2 # Overall similar pattern between OverallQual and SalePrice for each Neighborhood
+# Those that rate houses seem to be consistent vs SalesPrice
+
+# Price by OverallQuality
+neighborhood3 <- ggplot(citygroup, aes(x = OverallQual, y = SalePrice)) +
+  geom_smooth(method = "lm") +
+  scale_y_continuous(labels = comma)
+
+neighborhood3
+# Price appears to be directly related to OverallQual (shows the people are accurate in their ratings of a house)
+
+# Neighborhood by house age
+neighborhood4 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (2018 - YearBuilt))) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(name = "Avg. House Age (yrs)") +
+  geom_hline(yintercept = mean(2018 - citygroup$YearBuilt), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+neighborhood4
+
+# House size by Neighborhood
+neighborhood5 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (citygroup$SF))) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(labels = comma, name = "Square Footage (sqft)") +
+  geom_hline(yintercept = mean(citygroup$SF), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+neighborhood5 # Most neighborhoods follow the trend larger homes = higher sales price
+
+# Lot area by Neighborhood
+neighborhood6 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (citygroup$LotArea))) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(name = "Lot Area (sqft)") +
+  geom_hline(yintercept = mean(citygroup$LotArea), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+neighborhood6 # Some neighborhoods have significantly larger lot areas (and several significantly less, probably town houses etc)
+
+# Comparison graph
+# Neighborhood 1 and 2 compared, Shows some large differences between SalePrice and OverallQual by Neighborhood.
+# NoRidge has highest SalePrice but 3rd highest Quality rating, and Blueste has a significantly lower SalePrice vs quality rating
+# Can see that places like BrDale, Blueste, NPkVill all have higher quality than their respective neighbors for saleprice. This shows that they are best value
+grid.arrange(neighborhood1, neighborhood2, neighborhood5, neighborhood6, neighborhood4, nrow = 5)
+```
+#SalePrice
+
+Having thousands of data points on a diverse group of houses, there are many interesting data points to discuss. There were some very obvious ways to initially look at the data but I also discovered more abstract ways to see it too. Some important findings to my data analysis included simple comparison of sale price with basic things such as house size, age, etc but also some interested things were seen when comparing houses by neighborhoods to see trends across the city.
+
+Initially, the very first thing I wanted to see was sale price shown by count. This gives a quick idea of how the data is represented. As can be seen below, the sale price is roughly normal, skewed to the right slightly which makes sense, considering there isn't an upper limit on housing prices and expensive houses can be built anywhere. There appears to be a noticeable dip in value near where the mean and median area. One goal is to understand why this occurs.Also of note, there are 1459 NA's, which are the missing values to be predicted for SalePrice.
+
+```{r SalePrice Histogram, echo=FALSE, message=FALSE, warning=FALSE}
+# _______Sale Price__________
+ggplot(combined, aes(x = SalePrice)) +
+  geom_histogram(fill = "red", binwidth = 10000) + 
+  stat_bin(binwidth = 10000, geom = "text", aes(label = ..count..), vjust = -1.5) +
+  scale_x_continuous(limits = c(1, 400000), labels = scales::comma)
+
+summary(combined$SalePrice)
+#   Min. 1st Qu.  Median   Mean    3rd Qu.    Max. 
+# 34900  129975   163000   180921  214000     755000
+```
+
+#House Size
+
+The first predictable analysis I did was sale price vs house size. I used the sum of the basement, 1st, and 2nd floor square footage to create a scatter plot of the various house sizes and what they sold for. As expected, there was a strong trend for the larger the house, the more it sold for. There appear to be a few exceptions (houses 1299 and 524) which appear to have sold for significantly less than expected for the size. I plan on looking into this more to determine the reasons that these houses could be valued so low, perhaps they are old, or the quality is very low. Those were my initial thoughts and a quick look at the data shows they were both recently built (2008 and 2007) and have been given an "OverallQual" value of 10, the highest (and also the most influential variable for SalePrice based on correlation). So it will be interesting to determine why those two houses are much lower in price.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# _______SalePrice vs Square Foot______
+# Is there a relation to size of house and price?    
+ggplot(combined, aes(x = X1stFlrSF + X2ndFlrSF + BsmtFinSF1, y = SalePrice)) +
+  geom_point() +
+  scale_y_continuous(labels = scales::comma) +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(name = "Bsmt + 1st + 2nd Floor (sqft)")
+# Yes positive correlation between house size and price
+# look at the outliers
+size <- combined %>% as_tibble() %>% mutate(
+  sqft = X1stFlrSF + X2ndFlrSF + BsmtFinSF1
+)
+# Houses 1299 (11286sqft), 255(6936sqft), 524(6572sqft)
+# View(size[c(1299, 524, 1183), ])
+# Determine why they are so low in value?
+```
+
+```{r Correlation, echo=FALSE, message=FALSE, warning=FALSE}
+corrplot.mixed(cor_numVar, tl.col = "black", tl.pos = "lt")
+# Shows that there could be issues with colinearity (such as with garagecars and garage area
+# both of which have a strong correlation with SalePrice). 
+```
+
+#Overall Quality
+Using a correlation plot, I was able to determine that OverallQual had the largest effect on SalePrice, having a correlation value of 0.79. I wanted to better understand just how much impact OverallQual had so I decided to make a graph. I was surprised to actually see that OverallQual which "Rates the overall materiel and finish of the houses", which would also be subjective bias from whoever was giving the ratings, was so strongly related. As quality rating goes up, so does the value of the house (which makes sense). There also appears to be a large change in rate between 6 and 7, suggesting that materials with quality of 7 or higher have greater impact on increasing a home's value per unit.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+Quality_Box <- ggplot(combined, aes(x = factor(OverallQual), y = SalePrice)) + # factor() splits graph by numbered value
+  geom_boxplot(col = "blue") +
+  labs(x = "Overall Quality") +
+  scale_y_continuous(labels = comma)
+  
+Quality_Box + geom_smooth(methond = "lm", se = FALSE, aes(group = 1), color = "red")
+
+# Clearly shows that as Overal Quality goes up, so does Sale Price (not surprising)
+# Seems to be a change in rate between 6 and 7. The price/quality point seems to increase there 
+# As quality goes up, so does the variance in prices (expected), as features vary and so does associated costs
+# No major outliers other than a high cost house with quality 4(mistake?), and possibly a low cost home at quality 10.
+```
+
+#Neighborhood
+
+Lastly, to look at things a little differently I decided to group everything by neighborhood to see what trends there were by different areas of the city, and wasn't surprised when I noticed some significant differences. Most people know that cities have both good and bad neighborhoods which can be determined by a number of things, including the type and quality of houses, distance to and quality of schools, hospitals, churches, police, and crime rates. First, I ranked the neighborhoods in ascending order by average SalePrice for the homes for each and marked the mean with a dashed line. I then used the same ascending order to show each neighborhood's OverallQual, SquareFootage, LotArea, and average age of house. Stitching the plots together then allows for simple and easy comparison. Looking at OverallQual, there are some neighborhoods that appear to have houses which have higher quality relative to their SalePrice, such as in Blueste. This means that some homes are selling for less than their true value and would be a great purchase. With the house size graph, some neighborhoods have houses larger than those of similar value, such as in SWISU neighborhood and could provide a large family a lower priced home than potentially elsewhere in the city. Lot Area and house age provided some insight to the other graphs by having less apparent trends due to more outliers but still providing useful information. Neighborhoods that had more expensive homes tend to also have larger plots of land and be newer, but not always.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+grid.arrange(neighborhood1, neighborhood2, nrow =2)
+grid.arrange(neighborhood5, neighborhood6, nrow=2)
+grid.arrange(neighborhood4, nrow=2)
+
+```
+
+#Conclusion
+
+There is quite a lot of data still to be looked at and understand what is going on. I have some questions already to look deeper for the answers and know many more will show up as I dig deeper. There will be more need to analyze the factor variables as well for the influences they may have on the value of homes, which can't be as easily quantified as the initial data was since it was numeric.
